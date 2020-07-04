@@ -40,7 +40,7 @@ def load_model(model, checkpoint, args, verbose=False):
 
     if args.fp16:
         logger.info('in fp16, model.half() activated')
-        model.half()
+        # model.half()
     model.to(device)
     if n_gpu > 1:
         logging.info('data parallel because more than one gpu')

@@ -11,11 +11,12 @@ import re
 import argparse
 import traceback
 import json
-import bz2
 import gzip
 from nltk.tokenize import TweetTokenizer
 from flashtext import KeywordProcessor
 import hashlib
+import zstandard as zstd
+import io
 
 def makedirs(fld):
 	if not os.path.exists(fld):
@@ -37,6 +38,7 @@ parser.add_argument("--discard_tgt_keys", help="hashes of targets to discard")
 parser.add_argument("--freq_words", help="words sorted by their corpus frequencies")
 parser.add_argument("--bl_subreddits", help="blocklist of offensive subreddits")
 parser.add_argument("--wl_subreddits", help="whitelist of relatively safe subreddits")
+parser.add_argument("--only_subreddit", help="whitelist a single subreddit")
 parser.add_argument("--reddit_input", default="d:/data/reddit/bz2/", help="Location of the input reddit data (bz2 files)")
 parser.add_argument("--reddit_output", default="d:/data/reddit/", help="Location of the output reddit data (conversations)")
 parser.add_argument("--max_len", default=30, type=int)
@@ -119,15 +121,19 @@ def gpt_norm_sentence(txt):
 
 
 def extract_submissions(fld_bz2, fld_split, size=2e5):
-	path_in = fld_bz2 + '/RS_%s.bz2'%args.dump_name
+	path_in = fld_bz2 + '/RS_%s.zst'%args.dump_name
 	n = 0
 	m = 0
 	sub = 0
 	sid = []
 	sids = []
 	lines = []
-	with bz2.open(path_in, 'rt', encoding="utf-8") as f:
-		for line in f:
+	with open(path_in, 'rb') as f:
+		dctx = zstd.ZstdDecompressor()
+		stream_reader = dctx.stream_reader(f)
+		buffered_reader = io.BufferedReader(stream_reader)
+		text_stream = io.TextIOWrapper(buffered_reader, encoding="utf-8")
+		for line in text_stream:
 			n += 1
 			if n%1e4 == 0:
 				print('[%s] selected %.3fM from %.2fM submissions'%(
@@ -136,6 +142,10 @@ def extract_submissions(fld_bz2, fld_split, size=2e5):
 				submission = json.loads(line)
 				if int(submission['num_comments']) < 2: # filter 1
 					continue
+				if len(wl_subreddits): # filter
+					subreddit = submission['permalink'].split('/')[2].lower()
+					if subreddit not in wl_subreddits:
+						continue
 				submission['title'] = norm_sentence(submission['title'], True)
 				lines.append('\t'.join([str(submission[k]) for k in fields_subm]))
 				m += 1
@@ -163,7 +173,7 @@ def extract_submissions(fld_bz2, fld_split, size=2e5):
 
 
 def extract_comments(fld_bz2, fld_split, sids):
-	path_in = fld_bz2 + '/RC_%s.bz2'%args.dump_name
+	path_in = fld_bz2 + '/RC_%s.zst'%args.dump_name
 	n = 0
 	m = 0
 	n_sub = len(sids)
@@ -171,8 +181,12 @@ def extract_comments(fld_bz2, fld_split, sids):
 	for sub in range(n_sub):
 		open(fld_split + '/rc_sub%i.tsv'%sub, 'w')
 
-	with bz2.open(path_in, 'rt', encoding="utf-8") as f:
-		for line in f:
+	with open(path_in, 'rb') as f:
+		dctx = zstd.ZstdDecompressor()
+		stream_reader = dctx.stream_reader(f)
+		buffered_reader = io.BufferedReader(stream_reader)
+		text_stream = io.TextIOWrapper(buffered_reader, encoding="utf-8")
+		for line in text_stream:
 			n += 1
 			if n%1e4 == 0:
 				print('[%s] selected %.3fM from %.2fM comments'%(
@@ -189,6 +203,10 @@ def extract_comments(fld_bz2, fld_split, sids):
 				if args.keep_keys:
 					k = '\t'.join([comment['link_id'], get_comment_id(comment), 'dep'])
 					if k not in keys.keys():
+						continue
+				if len(wl_subreddits): # filter
+					subreddit = comment['subreddit'].lower()
+					if subreddit not in wl_subreddits:
 						continue
 				if comment['body'] == '[deleted]': # filter 1
 					continue
@@ -306,7 +324,7 @@ def filter_instance(src, tgt, info):
 def save_convo(path_rs, path_rc, path_out):
 	print('reading submissions...')
 	submissions = dict()
-	with gzip.open(path_rs, mode='rt', encoding='utf-8') as f:
+	with open(path_rs, mode='r', encoding='utf-8') as f:
 		for line in f:
 			cells = line.strip('\n').strip().split('\t')
 			try:
@@ -318,7 +336,7 @@ def save_convo(path_rs, path_rc, path_out):
 
 	print('reading comments...')
 	comments = dict()
-	with gzip.open(path_rc, mode='rt', encoding='utf-8') as f:
+	with open(path_rc, mode='r', encoding='utf-8') as f:
 		for line in f:
 			cells = line.strip('\n').strip().split('\t')
 			try:
@@ -376,6 +394,13 @@ def save_convo(path_rs, path_rc, path_out):
 				continue
 			if subreddit in bl_subreddits:
 				print("skip\tbad_subreddit\t%s\tN/A\toffensive subreddit: %s" % (info, subreddit), file=sys.stderr)
+				continue
+		if len(wl_subreddits):
+			if not subreddit:
+				print("skip\tmissing\t%s\tN/A\tmissing submission: %s" % (info, sid), file=sys.stderr)
+				continue
+			if subreddit not in wl_subreddits:
+				# print("skip\tbad_subreddit\t%s\tN/A\t subreddit: %s" % (info, subreddit), file=sys.stderr)
 				continue
 
 		comment = comments[cid]
@@ -448,7 +473,7 @@ def build_conv(fld_out):
 	sum_m = 0
 	sum_n = 0
 	while True:
-		path_rs = fld_split + '/rs_sub%i.tsv.gz'%sub
+		path_rs = fld_split + '/rs_sub%i.tsv'%sub
 		if not os.path.exists(path_rs):
 			if sub == 0:
 				print('no such file: '+path_rs)
@@ -499,6 +524,17 @@ if args.bl_subreddits:
 				continue
 			s = line.rstrip().lower()
 			bl_subreddits[s] = 1
+if args.wl_subreddits:
+	with open(args.wl_subreddits, 'rt', encoding="utf-8") as f:
+		for line in f:
+			if line[0] == '#':
+				continue
+			s = line.rstrip().lower()
+			wl_subreddits[s] = 1
+if args.only_subreddit:
+	s = args.only_subreddit.rstrip().lower()
+	wl_subreddits[s] = 1
+	print(wl_subreddits)
 
 if args.ignore_keys:
 	args.keep_keys = None

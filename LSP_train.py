@@ -18,7 +18,7 @@ import torch
 import numpy as np
 
 from os.path import join
-from torch.distributed import get_rank, get_world_size
+# from torch.distributed import get_rank, get_world_size
 
 from lsp_model import GPT2LMHeadModel, GPT2Tokenizer, GPT2Config, Adam
 from gpt2_training.train_utils import load_model, boolean_string, set_lr, get_eval_list_same_length
@@ -129,17 +129,18 @@ if args.local_rank == -1:
     n_gpu = torch.cuda.device_count()
     args.device, args.n_gpu = device, n_gpu
 else:
-    # distributed training
-    torch.cuda.set_device(args.local_rank)
-    device = torch.device("cuda", args.local_rank)
-    # Initializes the distributed backend which will take care of
-    # sychronizing nodes/GPUs
-    torch.distributed.init_process_group(backend='nccl')
-    n_gpu = torch.distributed.get_world_size()
-    args.device, args.n_gpu = device, 1
-    logger.info("device: {} n_gpu: {}, distributed training: {}, "
-                "16-bits training: {}".format(
-                    device, n_gpu, bool(args.local_rank != -1), args.fp16))
+    pass
+    # # distributed training
+    # torch.cuda.set_device(args.local_rank)
+    # device = torch.device("cuda", args.local_rank)
+    # # Initializes the distributed backend which will take care of
+    # # sychronizing nodes/GPUs
+    # torch.distributed.init_process_group(backend='nccl')
+    # n_gpu = torch.distributed.get_world_size()
+    # args.device, args.n_gpu = device, 1
+    # logger.info("device: {} n_gpu: {}, distributed training: {}, "
+    #             "16-bits training: {}".format(
+    #                 device, n_gpu, bool(args.local_rank != -1), args.fp16))
 
 np.random.seed(args.seed)
 torch.random.manual_seed(args.seed)
@@ -153,7 +154,7 @@ output_dir = join(args.output_dir,
                                                args.train_batch_size, n_gpu,
                                                timestamp))
 log_dir = args.log_dir if args.log_dir is not None and len(args.log_dir) > 0 else output_dir
-if args.local_rank == -1 or get_rank() == 0:
+if args.local_rank == -1:
     os.makedirs(output_dir, exist_ok=True)
 
 logger.info('Input Argument Information')
@@ -175,10 +176,11 @@ if args.local_rank == -1:
                                            args.train_batch_size,
                                            args.max_seq_length)
 else:
-    train_dataloader = DistributedBucketingDataLoader(
-        get_rank(), get_world_size(),
-        args.train_input_file, args.train_batch_size,
-        args.max_seq_length)
+    pass
+    # train_dataloader = DistributedBucketingDataLoader(
+    #     get_rank(), get_world_size(),
+    #     args.train_input_file, args.train_batch_size,
+    #     args.max_seq_length)
 
 eval_dataloader_loss = DynamicBatchingLoader(
     args.eval_input_file, enc, args.normalize_data,
@@ -216,33 +218,34 @@ optimizer_grouped_parameters = [
 if args.fp16:
     logger.info('in fp16, using FusedAdam')
     try:
-        from apex.optimizers import FP16_Optimizer
+        from apex import amp
+        from apex.fp16_utils import FP16_Optimizer
         from apex.optimizers import FusedAdam
     except ImportError:
         raise ImportError(
             "Please install apex from https://www.github.com/nvidia/apex "
             "to use distributed and fp16 training.")
+    # https://nvidia.github.io/apex/amp.html
 
     optimizer = FusedAdam(optimizer_grouped_parameters,
                           lr=args.learning_rate,
-                          bias_correction=False,
-                          max_grad_norm=1.0)
-    if args.loss_scale == 0:
-        optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True,
-                                   verbose=False)
-    else:
-        optimizer = FP16_Optimizer(optimizer,
-                                   static_loss_scale=args.loss_scale,
-                                   verbose=False)
+                          bias_correction=False)
+    model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
+    # if args.loss_scale == 0:
+    #     optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True,
+    #                                verbose=False)
+    # else:
+    #     optimizer = FP16_Optimizer(optimizer,
+    #                                static_loss_scale=args.loss_scale,
+    #                                verbose=False)
 else:
-    optimizer = Adam(optimizer_grouped_parameters, args.learning_rate,
-                     max_grad_norm=1.0)
+    optimizer = Adam(optimizer_grouped_parameters, args.learning_rate)
 
 #########################################################################
 # Training !
 ##########################################################################
 
-if args.local_rank == -1 or get_rank() == 0:
+if args.local_rank == -1:
     train_logger = open(join(log_dir, 'train_log.txt'), 'a+', buffering=1)
     eval_logger = open(join(log_dir, 'eval_log.txt'), 'a+', buffering=1)
     print('epoch,global_step,step,mean_loss,mean_ppl,n_token_real,'
@@ -260,7 +263,7 @@ if args.continue_from:
 
 if args.local_rank != -1:
     n_gpu = 1
-if args.local_rank == -1 or get_rank() == 0:
+if args.local_rank == -1:
     if args.pbar:
         pbar = tqdm.tqdm(total=args.num_optim_steps, desc=f"training")
     else:
@@ -285,7 +288,9 @@ while True:
             ppl = ppl.mean()
         loss = loss / (args.train_batch_size / input_ids.shape[0])
         if args.fp16:
-            optimizer.backward(loss)
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+            # optimizer.backward(loss)
         else:
             loss.backward()
 
@@ -321,15 +326,16 @@ while True:
 
             # Print log info to file
             if args.local_rank != -1:
-                mean_loss = sum(all_gather_list(mean_loss)) / get_world_size()
-                mean_ppl = sum(all_gather_list(mean_ppl)) / get_world_size()
-                n_token_real_all_proc = sum(all_gather_list(n_token_real))
-                n_token_total_all_proc = sum(all_gather_list(n_token_total))
+                pass
+                # mean_loss = sum(all_gather_list(mean_loss)) / get_world_size()
+                # mean_ppl = sum(all_gather_list(mean_ppl)) / get_world_size()
+                # n_token_real_all_proc = sum(all_gather_list(n_token_real))
+                # n_token_total_all_proc = sum(all_gather_list(n_token_total))
             else:
                 n_token_real_all_proc = n_token_real
                 n_token_total_all_proc = n_token_total
 
-            if args.local_rank == -1 or get_rank() == 0:
+            if args.local_rank == -1:
                 epoch_time = time.time() - train_start_time_epoch
                 if pbar is not None:
                     pbar.set_postfix_str(
@@ -342,7 +348,7 @@ while True:
                     file=train_logger)
 
             if global_step % args.valid_step == 0:
-                if args.local_rank == -1 or get_rank() == 0:
+                if args.local_rank == -1:
                     # only rank 0 process evaluate
                     torch.save(
                         {k: (v.cpu() if v is not None else None)  # save to cpu tensors
@@ -379,7 +385,7 @@ while True:
     epoch += 1
 
 
-if args.local_rank == -1 or get_rank() == 0:
+if args.local_rank == -1:
     if pbar is not None:
         pbar.close()
     train_logger.close()

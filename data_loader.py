@@ -287,5 +287,5 @@ class DynamicBatchingLoader(object):
 
     def get_len(self, corpus):
         n_line = int(sp.check_output(f"wc -l {corpus}".split(),
-                                     universal_newlines=True).split()[0])
+                                    universal_newlines=True).split()[0])
         return n_line
